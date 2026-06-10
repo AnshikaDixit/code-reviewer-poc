@@ -55,42 +55,51 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
 
 async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
     """
-    Orchestrates the PR analysis by downloading the structural diff content,
-    forwarding it to the LLM core, and publishing results back to the pull request.
+    Orchestrates the PR analysis by checking for existing comments to prevent duplicates,
+    downloading the structural diff content, querying Gemini, and publishing unique results.
     """
-    # 1. Pull the raw unified diff text using native GitHub API media headers
-    async with httpx.AsyncClient() as client:
-        headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3.diff"
-        }
-        diff_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
-        response = await client.get(diff_url, headers=headers)
-        pr_diff = response.text
+    comment_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments"
+    
+    comment_headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
 
-    # 2. Process the cryptographic diff context using the Gemini reasoning engine
-    review_suggestion = ask_gemini_to_review(pr_diff)
-
-    # 3. Post the inline comment directly to GitHub using native REST API payloads.
-    # This bypasses PyGithub SDK parameter conflicts entirely.
     try:
-        comment_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments"
-        
-        comment_headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        # Structure the payload exactly as required by the GitHub REST API spec.
-        # 'position=1' targets the very first modified line inside the unified diff hunk.
-        comment_payload = {
-            "body": f"### 🤖 Gemini AI Review Feedback\n\n{review_suggestion}",
-            "commit_id": commit_sha,
-            "path": "calculator.py",
-            "position": 1  
-        }
-        
         async with httpx.AsyncClient() as httpx_client:
+            # 1. Fetch existing review comments on the PR to prevent duplicate entries
+            existing_comments_res = await httpx_client.get(comment_url, headers=comment_headers)
+            
+            if existing_comments_res.status_code == 200:
+                comments_list = existing_comments_res.json()
+                # Check if our specific bot signature signature already exists in any comment body
+                for comment in comments_list:
+                    if "### 🤖 Gemini AI Review Feedback" in comment.get("body", ""):
+                        print(f"⏭️ Skipping comment generation. Review comment already exists on PR #{pr_number}.")
+                        return
+            else:
+                print(f"⚠️ Could not verify existing comments. Status: {existing_comments_res.status_code}")
+
+            # 2. Pull the raw unified diff text using native GitHub API media headers
+            diff_headers = {
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3.diff"
+            }
+            diff_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
+            diff_response = await httpx_client.get(diff_url, headers=diff_headers)
+            pr_diff = diff_response.text
+
+            # 3. Process the cryptographic diff context using the Gemini reasoning engine
+            review_suggestion = ask_gemini_to_review(pr_diff)
+
+            # 4. Post the inline comment directly to GitHub since it is confirmed unique
+            comment_payload = {
+                "body": f"### 🤖 Gemini AI Review Feedback\n\n{review_suggestion}",
+                "commit_id": commit_sha,
+                "path": "calculator.py",
+                "position": 1  # Target the first modified line inside the unified diff hunk
+            }
+            
             res = await httpx_client.post(comment_url, headers=comment_headers, json=comment_payload)
             
             if res.status_code == 201:
@@ -99,7 +108,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                 print(f"❌ Failed to post comment. Status: {res.status_code}, Response: {res.text}")
                 
     except Exception as e:
-        print(f"❌ Exception occurred while posting comment: {e}")
+        print(f"❌ Exception occurred during PR analysis lifecycle: {e}")
 
 def ask_gemini_to_review(diff_text: str) -> str:
     """
@@ -115,7 +124,6 @@ def ask_gemini_to_review(diff_text: str) -> str:
     {diff_text}
     """
     
-    # Swapped to gemini-2.5-flash for maximum availability and to avoid free-tier 503 throttling
     response = ai_client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
