@@ -6,28 +6,34 @@ from google import genai
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+# Load environment variables from the local .env configuration file
 load_dotenv()
 
-# Initialize FastAPI app
+# Initialize FastAPI application
 app = FastAPI(title="Code Reviewer POC")
 
-# Ensure environment variables are loaded
+# Fetch sensitive access tokens and credentials from the environment
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GITHUB_TOKEN or not GEMINI_API_KEY:
     print("⚠️ WARNING: GITHUB_TOKEN or GEMINI_API_KEY is missing from environment variables!")
 
-# Initialize GitHub and Gemini clients
+# Initialize the official GitHub and Google GenAI SDK clients
 gh = Github(GITHUB_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 @app.get("/")
 def read_root():
+    """Health check endpoint to ensure the backend service is up and running."""
     return {"status": "healthy", "service": "PR Reviewer Bot"}
 
 @app.post("/webhook")
 async def github_webhook(request: Request, x_github_event: str = Header(None)):
+    """
+    Main webhook listener that intercepts incoming event payloads routed from GitHub.
+    Filters traffic to execute logic exclusively on critical pull request stages.
+    """
     # Only listen to events related to Pull Requests
     if x_github_event != "pull_request":
         return {"message": f"Ignored event type: {x_github_event}"}
@@ -48,7 +54,11 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
     return {"message": f"Action '{action}' ignored"}
 
 async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
-    # 1. Pull the cryptographic diff from GitHub's custom media headers
+    """
+    Orchestrates the PR analysis by downloading the structural diff content,
+    forwarding it to the LLM core, and publishing results back to the pull request.
+    """
+    # 1. Pull the raw unified diff text using native GitHub API media headers
     async with httpx.AsyncClient() as client:
         headers = {
             "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -58,27 +68,44 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
         response = await client.get(diff_url, headers=headers)
         pr_diff = response.text
 
-    # 2. Feed the cryptographic diff context straight into Gemini
+    # 2. Process the cryptographic diff context using the Gemini reasoning engine
     review_suggestion = ask_gemini_to_review(pr_diff)
 
-    # 3. Post a comment inline back to the target PR file
-    repo = gh.get_repo(repo_name)
-    pull_request = repo.get_pull(pr_number)
-    
+    # 3. Post the inline comment directly to GitHub using native REST API payloads.
+    # This bypasses PyGithub SDK parameter conflicts entirely.
     try:
-        # Note: Change 'main.py' to match any file name that is actually modified in your test PR
-        # 'position=1' means the first line inside the modified code block (the diff hunk)
-        pull_request.create_review_comment(
-            body=f"### 🤖 Gemini AI Review Feedback\n\n{review_suggestion}",
-            commit_id=repo.get_commit(commit_sha),
-            path="main.py", 
-            position=1 
-        )
-        print("✅ Comment successfully posted to GitHub!")
+        comment_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/comments"
+        
+        comment_headers = {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        # Structure the payload exactly as required by the GitHub REST API spec.
+        # 'position=1' targets the very first modified line inside the unified diff hunk.
+        comment_payload = {
+            "body": f"### 🤖 Gemini AI Review Feedback\n\n{review_suggestion}",
+            "commit_id": commit_sha,
+            "path": "calculator.py",
+            "position": 1  
+        }
+        
+        async with httpx.AsyncClient() as httpx_client:
+            res = await httpx_client.post(comment_url, headers=comment_headers, json=comment_payload)
+            
+            if res.status_code == 201:
+                print("✅ Comment successfully posted to GitHub via REST API!")
+            else:
+                print(f"❌ Failed to post comment. Status: {res.status_code}, Response: {res.text}")
+                
     except Exception as e:
-        print(f"❌ Failed to post comment: {e}")
+        print(f"❌ Exception occurred while posting comment: {e}")
 
 def ask_gemini_to_review(diff_text: str) -> str:
+    """
+    Queries the Gemini model with a structured analysis prompt to parse
+    vulnerabilities, logic traps, and syntax gaps from the diff snippet.
+    """
     prompt = f"""
     You are an expert code reviewer. Review the following GitHub PR diff text.
     Identify any obvious bugs, logic flaws, or performance issues.
@@ -88,6 +115,7 @@ def ask_gemini_to_review(diff_text: str) -> str:
     {diff_text}
     """
     
+    # Swapped to gemini-2.5-flash for maximum availability and to avoid free-tier 503 throttling
     response = ai_client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
