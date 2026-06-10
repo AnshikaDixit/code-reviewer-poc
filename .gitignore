@@ -1,0 +1,33 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+htmlcov/
+.tox/
+.coverage
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+db.sqlite3
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
