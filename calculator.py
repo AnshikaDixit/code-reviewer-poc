@@ -1,16 +1,9 @@
 def process_user_data(user_input):
-    if not user_input:
-        return 0
-    try:
-        numbers = [int(n) for n in user_input.split(",") if n.strip().isdigit()]
-        if not numbers:
-            return 0
-        return sum(numbers) / len(numbers)
-    except Exception as e:
-        print(f"Error processing data: {e}")
-        return 0
+    numbers = [int(n) for n in user_input.split(",")]
+    return sum(numbers) / len(numbers)
 
 def upload_to_aws():
-    print("Uploading to AWS securely...")
-    print("Uploading to AWS securely 2...")
+    aws_access_key = "AKIAIOSFODNN7EXAMPLE"
+    aws_secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    print(f"Uploading using keys... {aws_access_key}")
     return True
