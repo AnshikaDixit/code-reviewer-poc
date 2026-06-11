@@ -35,7 +35,7 @@ async def get_github_installation_token(repo_name: str) -> str:
     payload = {
         "iat": now - 60,
         "exp": now + (10 * 60),
-        "iss": int(APP_ID)  # Ensure App ID is an integer
+        "iss": str(APP_ID)  # The issuer must be a string
     }
     
     jwt_token = jwt.encode(payload, private_key, algorithm="RS256")
