@@ -31,3 +31,10 @@ db.sqlite3
 .idea/
 *.swp
 *.swo
+
+# .pem files
+*.pem
+*.key
+*.crt
+*.p12
+*.pkcs12

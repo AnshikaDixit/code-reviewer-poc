@@ -6,11 +6,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Check credentials on startup
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+APP_ID = os.environ.get("GITHUB_APP_ID")
+PRIVATE_KEY_PATH = os.environ.get("GITHUB_PRIVATE_KEY_PATH")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-if not GITHUB_TOKEN or not GEMINI_API_KEY:
-    print("WARNING: GITHUB_TOKEN or GEMINI_API_KEY is missing from environment variables!")
+# Fixed the conditional check to use the correct variable names
+if not APP_ID or not PRIVATE_KEY_PATH or not GEMINI_API_KEY:
+    print("WARNING: GITHUB_APP_ID, GITHUB_PRIVATE_KEY_PATH or GEMINI_API_KEY is missing from environment variables!")
 
 from services.review_service import analyze_pull_request
 
