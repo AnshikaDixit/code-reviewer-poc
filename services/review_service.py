@@ -66,39 +66,118 @@ def ask_gemini_to_review(diff_text: str, max_retries: int = 3) -> str:
             else:
                 raise e
 
+# async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
+#     """
+#     Orchestrates the PR analysis by checking for existing comments to prevent duplicates,
+#     downloading the structural diff content, querying Gemini, and publishing unique results.
+#     """
+#     if not GITHUB_TOKEN:
+#         print("❌ GITHUB_TOKEN is missing. Cannot proceed with analysis.")
+#         return
+
+#     # Use the issues endpoint to post a general PR comment rather than a diff-specific inline comment
+#     comment_url = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
+    
+#     comment_headers = {
+#         "Authorization": f"Bearer {GITHUB_TOKEN}",
+#         "Accept": "application/vnd.github.v3+json"
+#     }
+
+#     try:
+#         async with httpx.AsyncClient() as httpx_client:
+#             # 1. Fetch existing review comments on the PR to prevent duplicate entries
+#             existing_comments_res = await httpx_client.get(comment_url, headers=comment_headers)
+            
+#             if existing_comments_res.status_code == 200:
+#                 comments_list = existing_comments_res.json()
+#                 # Check if our specific bot signature signature already exists in any comment body
+#                 for comment in comments_list:
+#                     if "### 🤖 Gemini AI Review Feedback" in comment.get("body", ""):
+#                         print(f"⏭️ Skipping comment generation. Review comment already exists on PR #{pr_number}.")
+#                         return
+#             else:
+#                 print(f"⚠️ Could not verify existing comments. Status: {existing_comments_res.status_code}")
+
+#             # 2. Pull the raw unified diff text using native GitHub API media headers
+#             diff_headers = {
+#                 "Authorization": f"Bearer {GITHUB_TOKEN}",
+#                 "Accept": "application/vnd.github.v3.diff"
+#             }
+#             diff_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}"
+#             diff_response = await httpx_client.get(diff_url, headers=diff_headers)
+#             pr_diff = diff_response.text
+
+#             # 3. Process the cryptographic diff context using the Gemini reasoning engine
+#             try:
+#                 review_json_str = ask_gemini_to_review(pr_diff)
+#             except Exception as e:
+#                 print(f"❌ Could not retrieve review from Gemini. Aborting PR analysis. Error: {e}")
+#                 return
+
+#             try:
+#                 review_data = json.loads(review_json_str)
+#             except json.JSONDecodeError:
+#                 print("❌ Failed to parse JSON from Gemini response.")
+#                 return
+
+#             # Format the output nicely for GitHub, and include the JSON for FE
+#             markdown_body = "### 🤖 Gemini AI Review Feedback\n\n"
+#             markdown_body += f"**Summary**: {review_data.get('summary', '')}\n\n"
+            
+#             markdown_body += "#### Detailed Comments:\n"
+#             for c in review_data.get('comments', []):
+#                 markdown_body += f"- **`{c.get('file_path')}:{c.get('line_number')}`** [{c.get('issue_type')}]: {c.get('comment')}\n"
+#                 if c.get('suggestion'):
+#                     markdown_body += f"  - *Suggestion*: `{c.get('suggestion')}`\n"
+            
+#             # Embed JSON for frontend parsers inside a hidden block
+#             markdown_body += "\n\n<!-- FE_DATA_START\n"
+#             markdown_body += json.dumps(review_data, indent=2)
+#             markdown_body += "\nFE_DATA_END -->\n"
+
+#             # 4. Post the general comment directly to GitHub since it is confirmed unique
+#             comment_payload = {
+#                 "body": markdown_body
+#             }
+            
+#             res = await httpx_client.post(comment_url, headers=comment_headers, json=comment_payload)
+            
+#             if res.status_code == 201:
+#                 print("✅ Comment successfully posted to GitHub via REST API!")
+#             else:
+#                 print(f"❌ Failed to post comment. Status: {res.status_code}, Response: {res.text}")
+                
+#     except Exception as e:
+#         print(f"❌ Exception occurred during PR analysis lifecycle: {e}")
+
 async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
-    """
-    Orchestrates the PR analysis by checking for existing comments to prevent duplicates,
-    downloading the structural diff content, querying Gemini, and publishing unique results.
-    """
     if not GITHUB_TOKEN:
         print("❌ GITHUB_TOKEN is missing. Cannot proceed with analysis.")
         return
 
-    # Use the issues endpoint to post a general PR comment rather than a diff-specific inline comment
-    comment_url = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
-    
     comment_headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
 
+    # General PR comment URL (for duplicate check + summary)
+    issue_comment_url = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
+    
+    # Inline review URL (for line-specific comments)
+    review_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews"
+
     try:
         async with httpx.AsyncClient() as httpx_client:
-            # 1. Fetch existing review comments on the PR to prevent duplicate entries
-            existing_comments_res = await httpx_client.get(comment_url, headers=comment_headers)
-            
-            if existing_comments_res.status_code == 200:
-                comments_list = existing_comments_res.json()
-                # Check if our specific bot signature signature already exists in any comment body
-                for comment in comments_list:
-                    if "### 🤖 Gemini AI Review Feedback" in comment.get("body", ""):
-                        print(f"⏭️ Skipping comment generation. Review comment already exists on PR #{pr_number}.")
-                        return
-            else:
-                print(f"⚠️ Could not verify existing comments. Status: {existing_comments_res.status_code}")
 
-            # 2. Pull the raw unified diff text using native GitHub API media headers
+            # 1. Check for duplicate review comments
+            existing_res = await httpx_client.get(issue_comment_url, headers=comment_headers)
+            if existing_res.status_code == 200:
+                for comment in existing_res.json():
+                    if "### 🤖 Gemini AI Review Feedback" in comment.get("body", ""):
+                        print(f"⏭️ Skipping. Review already exists on PR #{pr_number}.")
+                        return
+
+            # 2. Fetch the PR diff
             diff_headers = {
                 "Authorization": f"Bearer {GITHUB_TOKEN}",
                 "Accept": "application/vnd.github.v3.diff"
@@ -107,11 +186,11 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             diff_response = await httpx_client.get(diff_url, headers=diff_headers)
             pr_diff = diff_response.text
 
-            # 3. Process the cryptographic diff context using the Gemini reasoning engine
+            # 3. Get Gemini review
             try:
                 review_json_str = ask_gemini_to_review(pr_diff)
             except Exception as e:
-                print(f"❌ Could not retrieve review from Gemini. Aborting PR analysis. Error: {e}")
+                print(f"❌ Could not retrieve review from Gemini. Aborting. Error: {e}")
                 return
 
             try:
@@ -120,32 +199,42 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                 print("❌ Failed to parse JSON from Gemini response.")
                 return
 
-            # Format the output nicely for GitHub, and include the JSON for FE
-            markdown_body = "### 🤖 Gemini AI Review Feedback\n\n"
-            markdown_body += f"**Summary**: {review_data.get('summary', '')}\n\n"
-            
-            markdown_body += "#### Detailed Comments:\n"
-            for c in review_data.get('comments', []):
-                markdown_body += f"- **`{c.get('file_path')}:{c.get('line_number')}`** [{c.get('issue_type')}]: {c.get('comment')}\n"
-                if c.get('suggestion'):
-                    markdown_body += f"  - *Suggestion*: `{c.get('suggestion')}`\n"
-            
-            # Embed JSON for frontend parsers inside a hidden block
-            markdown_body += "\n\n<!-- FE_DATA_START\n"
-            markdown_body += json.dumps(review_data, indent=2)
-            markdown_body += "\nFE_DATA_END -->\n"
+            # 4. Build inline review comments for each issue
+            inline_comments = []
+            for c in review_data.get("comments", []):
+                file_path = c.get("file_path")
+                line_number = c.get("line_number")
+                comment_text = c.get("comment", "")
+                suggestion = c.get("suggestion", "")
+                issue_type = c.get("issue_type", "")
 
-            # 4. Post the general comment directly to GitHub since it is confirmed unique
-            comment_payload = {
-                "body": markdown_body
+                body = f"**[{issue_type}]** {comment_text}"
+                if suggestion:
+                    body += f"\n\n**Suggestion:**\n```python\n{suggestion}\n```"
+
+                if file_path and line_number:
+                    inline_comments.append({
+                        "path": file_path,
+                        "line": line_number,      # line in the new file
+                        "side": "RIGHT",           # RIGHT = new file, LEFT = old file
+                        "body": body
+                    })
+
+            # 5. Post a Pull Request Review with all inline comments in one API call
+            summary = review_data.get("summary", "")
+            review_payload = {
+                "commit_id": commit_sha,
+                "body": f"### 🤖 Gemini AI Review Feedback\n\n**Summary:** {summary}\n\n<!-- FE_DATA_START\n{json.dumps(review_data, indent=2)}\nFE_DATA_END -->",
+                "event": "COMMENT",              # Use "REQUEST_CHANGES" to block merging
+                "comments": inline_comments
             }
-            
-            res = await httpx_client.post(comment_url, headers=comment_headers, json=comment_payload)
-            
-            if res.status_code == 201:
-                print("✅ Comment successfully posted to GitHub via REST API!")
+
+            res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+
+            if res.status_code == 200:
+                print(f"✅ Review with {len(inline_comments)} inline comments posted successfully!")
             else:
-                print(f"❌ Failed to post comment. Status: {res.status_code}, Response: {res.text}")
-                
+                print(f"❌ Failed to post review. Status: {res.status_code}, Response: {res.text}")
+
     except Exception as e:
-        print(f"❌ Exception occurred during PR analysis lifecycle: {e}")
+        print(f"❌ Exception during PR analysis: {e}")
