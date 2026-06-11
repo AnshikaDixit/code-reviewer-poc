@@ -10,7 +10,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GITHUB_TOKEN or not GEMINI_API_KEY:
-    print("⚠️ WARNING: GITHUB_TOKEN or GEMINI_API_KEY is missing from environment variables!")
+    print("WARNING: GITHUB_TOKEN or GEMINI_API_KEY is missing from environment variables!")
 
 from services.review_service import analyze_pull_request
 
@@ -41,7 +41,7 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
         pr_number = payload["pull_request"]["number"]
         commit_sha = payload["pull_request"]["head"]["sha"]
         
-        print(f"🚀 Processing PR #{pr_number} on {repo_name}...")
+        print(f"Processing PR #{pr_number} on {repo_name}...")
         await analyze_pull_request(repo_name, pr_number, commit_sha)
         return {"message": "Analysis triggered successfully"}
 

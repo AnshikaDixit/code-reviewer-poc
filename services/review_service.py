@@ -58,10 +58,10 @@ def ask_gemini_to_review(diff_text: str, max_retries: int = 3) -> str:
             if "503" in err_msg or "429" in err_msg or "UNAVAILABLE" in err_msg or "ResourceExhausted" in err_msg:
                 if attempt < max_retries - 1:
                     sleep_time = 2 ** attempt
-                    print(f"⚠️ Gemini API busy (503/429). Retrying in {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
+                    print(f"Gemini API busy (503/429). Retrying in {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
                     time.sleep(sleep_time)
                 else:
-                    print(f"❌ Gemini API failed after {max_retries} attempts.")
+                    print(f"Gemini API failed after {max_retries} attempts.")
                     raise e
             else:
                 raise e
@@ -152,7 +152,7 @@ def ask_gemini_to_review(diff_text: str, max_retries: int = 3) -> str:
 
 async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
     if not GITHUB_TOKEN:
-        print("❌ GITHUB_TOKEN is missing. Cannot proceed with analysis.")
+        print("GITHUB_TOKEN is missing. Cannot proceed with analysis.")
         return
 
     comment_headers = {
@@ -173,8 +173,8 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             existing_res = await httpx_client.get(issue_comment_url, headers=comment_headers)
             if existing_res.status_code == 200:
                 for comment in existing_res.json():
-                    if "### 🤖 Gemini AI Review Feedback" in comment.get("body", ""):
-                        print(f"⏭️ Skipping. Review already exists on PR #{pr_number}.")
+                    if "### Gemini AI Review Feedback" in comment.get("body", ""):
+                        print(f"Skipping. Review already exists on PR #{pr_number}.")
                         return
 
             # 2. Fetch the PR diff
@@ -190,23 +190,29 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             try:
                 review_json_str = ask_gemini_to_review(pr_diff)
             except Exception as e:
-                print(f"❌ Could not retrieve review from Gemini. Aborting. Error: {e}")
+                print(f"Could not retrieve review from Gemini. Aborting. Error: {e}")
                 return
 
             try:
                 review_data = json.loads(review_json_str)
             except json.JSONDecodeError:
-                print("❌ Failed to parse JSON from Gemini response.")
+                print("Failed to parse JSON from Gemini response.")
                 return
 
             # 4. Build inline review comments for each issue
             inline_comments = []
+            seen_locations = set()
             for c in review_data.get("comments", []):
                 file_path = c.get("file_path")
                 line_number = c.get("line_number")
                 comment_text = c.get("comment", "")
                 suggestion = c.get("suggestion", "")
                 issue_type = c.get("issue_type", "")
+
+                location_key = (file_path, line_number)
+                if location_key in seen_locations:
+                    continue
+                seen_locations.add(location_key)
 
                 body = f"**[{issue_type}]** {comment_text}"
                 if suggestion:
@@ -224,7 +230,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             summary = review_data.get("summary", "")
             review_payload = {
                 "commit_id": commit_sha,
-                "body": f"### 🤖 Gemini AI Review Feedback\n\n**Summary:** {summary}\n\n<!-- FE_DATA_START\n{json.dumps(review_data, indent=2)}\nFE_DATA_END -->",
+                "body": f"### Gemini AI Review Feedback\n\n**Summary:** {summary}\n\n<!-- FE_DATA_START\n{json.dumps(review_data, indent=2)}\nFE_DATA_END -->",
                 "event": "COMMENT",              # Use "REQUEST_CHANGES" to block merging
                 "comments": inline_comments
             }
@@ -232,9 +238,23 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
 
             if res.status_code == 200:
-                print(f"✅ Review with {len(inline_comments)} inline comments posted successfully!")
+                print(f"Review with {len(inline_comments)} inline comments posted successfully!")
+            elif res.status_code == 422 and "Line could not be resolved" in res.text:
+                print("Failed to post inline comments due to unresolved lines. Falling back to general review comment...")
+                fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
+                for ic in inline_comments:
+                    fallback_body += f"- **{ic['path']}:{ic['line']}**: {ic['body'].replace(chr(10), ' ')}\n"
+                
+                review_payload["body"] = fallback_body
+                review_payload["comments"] = []
+                
+                fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+                if fallback_res.status_code == 200:
+                    print("Fallback review posted successfully!")
+                else:
+                    print(f"Failed to post fallback review. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
             else:
-                print(f"❌ Failed to post review. Status: {res.status_code}, Response: {res.text}")
+                print(f"Failed to post review. Status: {res.status_code}, Response: {res.text}")
 
     except Exception as e:
-        print(f"❌ Exception during PR analysis: {e}")
+        print(f"Exception during PR analysis: {e}")
