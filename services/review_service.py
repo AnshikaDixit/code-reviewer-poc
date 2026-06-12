@@ -68,7 +68,7 @@ async def get_github_installation_token(repo_name: str) -> str:
 
         return token_res.json()["token"]
 
-def ask_gemini_to_review(filename: str, diff_text: str, max_retries: int = 3) -> str:
+async def ask_gemini_to_review(filename: str, diff_text: str, max_retries: int = 3) -> str:
     """
     Queries the Gemini model with a structured analysis prompt to parse
     vulnerabilities, logic traps, and syntax gaps from a specific file's diff snippet.
