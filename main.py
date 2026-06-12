@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Header, BackgroundTasks
 from dotenv import load_dotenv
 
 # Load environment variables from the local .env configuration file
@@ -25,7 +25,7 @@ def read_root():
     return {"status": "healthy", "service": "PR Reviewer Bot"}
 
 @app.post("/webhook")
-async def github_webhook(request: Request, x_github_event: str = Header(None)):
+async def github_webhook(request: Request, background_tasks: BackgroundTasks, x_github_event: str = Header(None)):
     """
     Main webhook listener that intercepts incoming event payloads routed from GitHub.
     Filters traffic to execute logic exclusively on critical pull request stages.
@@ -44,7 +44,7 @@ async def github_webhook(request: Request, x_github_event: str = Header(None)):
         commit_sha = payload["pull_request"]["head"]["sha"]
         
         print(f"Processing PR #{pr_number} on {repo_name}...")
-        await analyze_pull_request(repo_name, pr_number, commit_sha)
-        return {"message": "Analysis triggered successfully"}
+        background_tasks.add_task(analyze_pull_request, repo_name, pr_number, commit_sha)
+        return {"status": "accepted"}
 
     return {"message": f"Action '{action}' ignored"}
