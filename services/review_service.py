@@ -172,13 +172,19 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
 
     try:
         async with httpx.AsyncClient() as httpx_client:
-            # 1. Check for duplicate review comments
-            existing_res = await httpx_client.get(issue_comment_url, headers=comment_headers)
+            # 1. Get already reviewed files to prevent duplicate per-file reviews
+            reviewed_files = set()
+            # Fetch existing reviews
+            existing_res = await httpx_client.get(review_url, headers=comment_headers)
             if existing_res.status_code == 200:
-                for comment in existing_res.json():
-                    if "### Gemini AI Review Feedback" in comment.get("body", ""):
-                        print(f"Skipping. Review already exists on PR #{pr_number}.")
-                        return
+                for review in existing_res.json():
+                    body = review.get("body", "")
+                    # Extract filename from header: ### Gemini AI Review Feedback for `filename`
+                    if "### Gemini AI Review Feedback for `" in body:
+                        start_idx = body.find("### Gemini AI Review Feedback for `") + len("### Gemini AI Review Feedback for `")
+                        end_idx = body.find("`", start_idx)
+                        if end_idx != -1:
+                            reviewed_files.add(body[start_idx:end_idx])
 
             # 2. Fetch the PR files
             files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
@@ -200,6 +206,10 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     continue
                 if filename.endswith((".lock", ".png", ".jpg", ".jpeg", ".svg", ".md", ".json")):
                     continue
+                if filename in reviewed_files:
+                    print(f"Skipping {filename}: Review already exists.")
+                    continue
+                    
                 eligible_files.append(file_obj)
 
             if not eligible_files:
