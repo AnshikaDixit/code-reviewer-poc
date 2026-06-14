@@ -224,20 +224,20 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             # Run all file reviews concurrently
             results = await asyncio.gather(*[review_file(f) for f in eligible_files])
 
-            inline_comments = []
-            seen_locations = set()
             file_summaries = []
 
             for filename, review_data in results:
                 if not review_data:
                     continue
                 
-                # Aggregate summary
+                # Aggregate summary for the final meta-comment
                 file_summary = review_data.get("summary", "")
                 if file_summary:
                     file_summaries.append(f"**{filename}**: {file_summary}")
                 
-                # Aggregate inline comments
+                inline_comments = []
+                seen_locations = set()
+
                 for c in review_data.get("comments", []):
                     c_file_path = c.get("file_path", filename) 
                     line_number = c.get("line_number")
@@ -262,36 +262,48 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                             "body": body
                         })
 
-            # 5. Post a single Pull Request Review for all files
-            combined_summary = "\n\n".join(file_summaries)
-            review_payload = {
-                "commit_id": commit_sha,
-                "body": f"### Gemini AI Review Feedback\n\n**Per-File Summary:**\n\n{combined_summary}\n\n",
-                "event": "COMMENT",
-                "comments": inline_comments
-            }
+                if not inline_comments:
+                    continue
 
-            res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+                # 5. Post a Pull Request Review for THIS specific file
+                review_payload = {
+                    "commit_id": commit_sha,
+                    "body": f"### Gemini AI Review Feedback for `{filename}`\n\n**Summary:** {file_summary}\n\n",
+                    "event": "COMMENT",
+                    "comments": inline_comments
+                }
 
-            # Fixed: GitHub returns 200 OK or 201 Created for a successful review submission
-            if res.status_code in [200, 201]:
-                print(f"Review with {len(inline_comments)} inline comments posted successfully!")
-            elif res.status_code == 422 and "Line could not be resolved" in res.text:
-                print(f"Failed to post inline comments due to unresolved lines. Falling back to general review comment...")
-                fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
-                for ic in inline_comments:
-                    fallback_body += f"- **{ic['path']}:{ic['line']}**: {ic['body'].replace(chr(10), ' ')}\n"
-                
-                review_payload["body"] = fallback_body
-                review_payload["comments"] = []
-                
-                fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
-                if fallback_res.status_code in [200, 201]:
-                    print(f"Fallback review posted successfully!")
+                res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+
+                if res.status_code in [200, 201]:
+                    print(f"Review for {filename} posted successfully with {len(inline_comments)} inline comments!")
+                elif res.status_code == 422 and "Line could not be resolved" in res.text:
+                    print(f"Failed to post inline comments for {filename} due to unresolved lines. Falling back to general review comment...")
+                    fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
+                    for ic in inline_comments:
+                        fallback_body += f"- **{ic['path']}:{ic['line']}**: {ic['body'].replace(chr(10), ' ')}\n"
+                    
+                    review_payload["body"] = fallback_body
+                    review_payload["comments"] = []
+                    
+                    fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+                    if fallback_res.status_code in [200, 201]:
+                        print(f"Fallback review for {filename} posted successfully!")
+                    else:
+                        print(f"Failed to post fallback review for {filename}. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
                 else:
-                    print(f"Failed to post fallback review. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
-            else:
-                print(f"Failed to post review. Status: {res.status_code}, Response: {res.text}")
+                    print(f"Failed to post review for {filename}. Status: {res.status_code}, Response: {res.text}")
+
+            # 6. Post a single high-level meta-summary comment for the whole PR
+            if file_summaries:
+                combined_summary = "\n\n".join(file_summaries)
+                summary_payload = {
+                    "commit_id": commit_sha,
+                    "body": f"### Gemini AI Meta-Summary\n\n**Per-File Overview:**\n\n{combined_summary}",
+                    "event": "COMMENT",
+                    "comments": []
+                }
+                await httpx_client.post(review_url, headers=comment_headers, json=summary_payload)
 
     except Exception as e:
         print(f"Exception during PR analysis: {e}")
