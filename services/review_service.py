@@ -206,105 +206,92 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                 print("No eligible files found to review.")
                 return
 
-            BATCH_SIZE = 15
-            total_eligible = len(eligible_files)
-            total_batches = (total_eligible + BATCH_SIZE - 1) // BATCH_SIZE
+            semaphore = asyncio.Semaphore(5)
 
-            for batch_idx in range(total_batches):
-                start_idx = batch_idx * BATCH_SIZE
-                end_idx = min(start_idx + BATCH_SIZE, total_eligible)
-                batch_files = eligible_files[start_idx:end_idx]
-
-                inline_comments = []
-                seen_locations = set()
-                file_summaries = []
-
-                print(f"--- Processing Batch {batch_idx + 1}/{total_batches} (Files {start_idx + 1} to {end_idx}) ---")
-                
-                for file_obj in batch_files:
-                    filename = file_obj.get("filename", "")
-                    patch = file_obj.get("patch", "")
-                    
+            async def review_file(file_obj):
+                filename = file_obj.get("filename", "")
+                patch = file_obj.get("patch", "")
+                async with semaphore:
                     print(f"Analyzing file: {filename}...")
-                    
                     try:
                         review_json_str = await ask_gemini_to_review(filename, patch)
-                    except Exception as e:
-                        print(f"Could not retrieve review for {filename}. Error: {e}")
-                        continue
-
-                    try:
                         review_data = json.loads(review_json_str)
-                    except json.JSONDecodeError:
-                        print(f"Failed to parse JSON for {filename}.")
+                        return (filename, review_data)
+                    except Exception as e:
+                        print(f"Could not retrieve or parse review for {filename}. Error: {e}")
+                        return (filename, None)
+
+            # Run all file reviews concurrently
+            results = await asyncio.gather(*[review_file(f) for f in eligible_files])
+
+            inline_comments = []
+            seen_locations = set()
+            file_summaries = []
+
+            for filename, review_data in results:
+                if not review_data:
+                    continue
+                
+                # Aggregate summary
+                file_summary = review_data.get("summary", "")
+                if file_summary:
+                    file_summaries.append(f"**{filename}**: {file_summary}")
+                
+                # Aggregate inline comments
+                for c in review_data.get("comments", []):
+                    c_file_path = c.get("file_path", filename) 
+                    line_number = c.get("line_number")
+                    comment_text = c.get("comment", "")
+                    suggestion = c.get("suggestion", "")
+                    issue_type = c.get("issue_type", "")
+
+                    location_key = (c_file_path, line_number)
+                    if location_key in seen_locations:
                         continue
-                    
-                    # Aggregate summary
-                    file_summary = review_data.get("summary", "")
-                    if file_summary:
-                        file_summaries.append(f"**{filename}**: {file_summary}")
-                    
-                    # Aggregate inline comments
-                    for c in review_data.get("comments", []):
-                        c_file_path = c.get("file_path", filename) 
-                        line_number = c.get("line_number")
-                        comment_text = c.get("comment", "")
-                        suggestion = c.get("suggestion", "")
-                        issue_type = c.get("issue_type", "")
+                    seen_locations.add(location_key)
 
-                        location_key = (c_file_path, line_number)
-                        if location_key in seen_locations:
-                            continue
-                        seen_locations.add(location_key)
+                    body = f"**[{issue_type}]** {comment_text}"
+                    if suggestion:
+                        body += f"\n\n**Suggestion:**\n```python\n{suggestion}\n```"
 
-                        body = f"**[{issue_type}]** {comment_text}"
-                        if suggestion:
-                            body += f"\n\n**Suggestion:**\n```python\n{suggestion}\n```"
+                    if line_number:
+                        inline_comments.append({
+                            "path": c_file_path,
+                            "line": line_number,
+                            "side": "RIGHT",
+                            "body": body
+                        })
 
-                        if line_number:
-                            inline_comments.append({
-                                "path": c_file_path,
-                                "line": line_number,
-                                "side": "RIGHT",
-                                "body": body
-                            })
+            # 5. Post a single Pull Request Review for all files
+            combined_summary = "\n\n".join(file_summaries)
+            review_payload = {
+                "commit_id": commit_sha,
+                "body": f"### Gemini AI Review Feedback\n\n**Per-File Summary:**\n\n{combined_summary}\n\n",
+                "event": "COMMENT",
+                "comments": inline_comments
+            }
 
-                # 5. Post a Pull Request Review for this batch
-                combined_summary = "\n\n".join(file_summaries)
-                batch_header = f"### Gemini AI Review Feedback (Batch {batch_idx + 1}/{total_batches} — reviewing files {start_idx + 1} to {end_idx} of {total_eligible} total)\n\n"
-                review_payload = {
-                    "commit_id": commit_sha,
-                    "body": f"{batch_header}**Per-File Summary:**\n\n{combined_summary}\n\n",
-                    "event": "COMMENT",
-                    "comments": inline_comments
-                }
+            res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
 
-                res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
-
-                # Fixed: GitHub returns 200 OK or 201 Created for a successful review submission
-                if res.status_code in [200, 201]:
-                    print(f"Batch {batch_idx + 1} with {len(inline_comments)} inline comments posted successfully!")
-                elif res.status_code == 422 and "Line could not be resolved" in res.text:
-                    print(f"Batch {batch_idx + 1} failed to post inline comments due to unresolved lines. Falling back to general review comment...")
-                    fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
-                    for ic in inline_comments:
-                        fallback_body += f"- **{ic['path']}:{ic['line']}**: {ic['body'].replace(chr(10), ' ')}\n"
-                    
-                    review_payload["body"] = fallback_body
-                    review_payload["comments"] = []
-                    
-                    fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
-                    if fallback_res.status_code in [200, 201]:
-                        print(f"Fallback review for batch {batch_idx + 1} posted successfully!")
-                    else:
-                        print(f"Failed to post fallback review for batch {batch_idx + 1}. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
+            # Fixed: GitHub returns 200 OK or 201 Created for a successful review submission
+            if res.status_code in [200, 201]:
+                print(f"Review with {len(inline_comments)} inline comments posted successfully!")
+            elif res.status_code == 422 and "Line could not be resolved" in res.text:
+                print(f"Failed to post inline comments due to unresolved lines. Falling back to general review comment...")
+                fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
+                for ic in inline_comments:
+                    fallback_body += f"- **{ic['path']}:{ic['line']}**: {ic['body'].replace(chr(10), ' ')}\n"
+                
+                review_payload["body"] = fallback_body
+                review_payload["comments"] = []
+                
+                fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
+                if fallback_res.status_code in [200, 201]:
+                    print(f"Fallback review posted successfully!")
                 else:
-                    print(f"Failed to post review for batch {batch_idx + 1}. Status: {res.status_code}, Response: {res.text}")
-
-                # Avoid hitting API rate limits if there are more batches
-                if batch_idx < total_batches - 1:
-                    print("Sleeping 5 seconds before next batch...")
-                    await asyncio.sleep(5)
+                    print(f"Failed to post fallback review. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
+            else:
+                print(f"Failed to post review. Status: {res.status_code}, Response: {res.text}")
 
     except Exception as e:
         print(f"Exception during PR analysis: {e}")
