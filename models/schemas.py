@@ -33,3 +33,15 @@ class CodeReviewResult(BaseModel):
     stats: ReviewStats
     comments: List[CodeReviewComment] = Field(description="List of specific code review findings")
     non_blocking_notes: List[str] = Field(default_factory=list)
+
+class FileTriage(BaseModel):
+    filename: str = Field(description="The path of the file being triaged")
+    risk_score: float = Field(description="The final risk score for this file, taking into account heuristics and AI analysis. Higher is riskier.")
+    reasoning: str = Field(description="Brief reasoning for the assigned risk score")
+
+class TriageResult(BaseModel):
+    files: List[FileTriage] = Field(description="List of triaged files with their updated risk scores")
+
+class SummaryReviewResult(BaseModel):
+    summary: str = Field(description="High-level risk summary of the entire PR")
+    module_risks: List[str] = Field(description="Module-level risk flags (e.g. 'auth/ heavily modified — manual review recommended')")
