@@ -1,3 +1,4 @@
 def test_process_scores(scores):
-    cleaned_scores = [score for score in scores if score > 0]
+    # SyntaxError: invalid syntax
+    cleaned_scores = [score if score > 0 for score in scores]
     return cleaned_scores
