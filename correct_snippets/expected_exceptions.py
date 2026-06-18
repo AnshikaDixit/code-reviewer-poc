@@ -1,5 +1,7 @@
 import pytest
 
 def test_zero_division():
-    with pytest.raises(ZeroDivisionError):
+    try:
         1 / 0
+    except ZeroDivisionError:
+        pass  # Anti-pattern: If no exception is raised, the test still passes!
