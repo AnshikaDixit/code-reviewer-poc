@@ -25,12 +25,12 @@ def read_root():
     """Health check endpoint to ensure the backend service is up and running."""
     return {"status": "healthy", "service": "PR Reviewer Bot"}
 
+from tests.test_routes import router as test_router
+app.include_router(test_router)
+
 @app.post("/webhook")
 async def github_webhook(request: Request, background_tasks: BackgroundTasks, x_github_event: str = Header(None)):
-    """
-    Main webhook listener that intercepts incoming event payloads routed from GitHub.
-    Filters traffic to execute logic exclusively on critical pull request stages.
-    """
+    """Main webhook listener that intercepts incoming event payloads routed from GitHub."""
     # Only listen to events related to Pull Requests
     if x_github_event != "pull_request":
         return {"message": f"Ignored event type: {x_github_event}"}
