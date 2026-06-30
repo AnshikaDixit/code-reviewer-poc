@@ -290,9 +290,24 @@ async def _perform_review(repo_name: str, pr_number: int, commit_sha: str, mcp_s
                 print(f"Failed to fetch reviewed files from DB: {e}")
 
             # 2. Fetch the PR files
-            files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
             res = await mcp_session.call_tool("get_pr_files", {"repo_name": repo_name, "pr_number": pr_number})
-            pr_files = json.loads(res.content[0].text)
+            if res.isError:
+                print(f"MCP Tool Error (get_pr_files): {res.content[0].text}")
+                return
+            try:
+                pr_files = json.loads(res.content[0].text)
+                if isinstance(pr_files, str):
+                    pr_files = json.loads(pr_files)
+            except Exception as e:
+                print(f"Failed to parse get_pr_files response: {e}")
+                return
+                
+            if isinstance(pr_files, dict):
+                print(f"Expected list for pr_files, got dict: {pr_files}")
+                return
+            if not isinstance(pr_files, list):
+                print(f"Expected list for pr_files, got {type(pr_files)}: {pr_files}")
+                return
 
             eligible_files = []
             for file_obj in pr_files:
@@ -521,7 +536,20 @@ async def _perform_review(repo_name: str, pr_number: int, commit_sha: str, mcp_s
 
             # Stale-SHA guard
             res = await mcp_session.call_tool("check_pr_sha", {"repo_name": repo_name, "pr_number": pr_number})
-            current_sha = json.loads(res.content[0].text)
+            if res.isError:
+                print(f"MCP Tool Error (check_pr_sha): {res.content[0].text}")
+                return
+            try:
+                current_sha = json.loads(res.content[0].text)
+                if isinstance(current_sha, str) and (current_sha.startswith("{") or current_sha.startswith('"')):
+                    # If it's a JSON string of a string, loads will handle it, but just in case
+                    try:
+                        current_sha = json.loads(current_sha)
+                    except:
+                        pass
+            except Exception as e:
+                print(f"Failed to parse check_pr_sha response: {e}")
+                return
             if current_sha and current_sha != commit_sha:
                 print(f"PR HEAD SHA has changed ({current_sha} != {commit_sha}). Aborting final review post.")
                 return
