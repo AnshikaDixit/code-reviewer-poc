@@ -543,15 +543,10 @@ async def _perform_review(repo_name: str, pr_number: int, commit_sha: str, mcp_s
                 print(f"MCP Tool Error (check_pr_sha): {res.content[0].text}")
                 return
             try:
-                current_sha = json.loads(res.content[0].text)
-                if isinstance(current_sha, str) and (current_sha.startswith("{") or current_sha.startswith('"')):
-                    # If it's a JSON string of a string, loads will handle it, but just in case
-                    try:
-                        current_sha = json.loads(current_sha)
-                    except:
-                        pass
+                # FastMCP returns raw strings as-is for str return types
+                current_sha = res.content[0].text.strip().strip('"')
             except Exception as e:
-                print(f"Failed to parse check_pr_sha response: {e}")
+                print(f"Failed to read check_pr_sha response: {e}")
                 return
             if current_sha and current_sha != commit_sha:
                 print(f"PR HEAD SHA has changed ({current_sha} != {commit_sha}). Aborting final review post.")
