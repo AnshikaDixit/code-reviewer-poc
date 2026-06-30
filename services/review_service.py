@@ -9,6 +9,10 @@ import httpx
 import urllib.parse
 from pydantic import ValidationError
 import asyncpg
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client, StdioServerParameters
+import sys
+
 from models.schemas import CodeReviewResult, TriageResult, SummaryReviewResult
 from dotenv import load_dotenv
 from constants.prompts import REVIEW_PROMPT_TEMPLATE, TRIAGE_PROMPT_TEMPLATE, SUMMARY_PROMPT_TEMPLATE
@@ -244,7 +248,6 @@ def calculate_local_risk_score(filename: str, patch: str) -> float:
 
 async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
     """Main orchestration function for evaluating pull requests based on size."""
-    start_time = time.time()
     try:
         await init_db()
         github_token = await get_github_installation_token(repo_name)
@@ -252,16 +255,26 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
         print(f"Init failed: {e}")
         return
 
-    comment_headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    server_env = os.environ.copy()
+    server_env["GITHUB_TOKEN"] = github_token
+    server_env["SCOPED_REPO"] = repo_name
 
-    review_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews"
-    issue_comment_url = f"https://api.github.com/repos/{repo_name}/issues/{pr_number}/comments"
-
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "services.github_mcp_server"],
+        env=server_env
+    )
+    
     try:
-        async with httpx.AsyncClient() as httpx_client:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as mcp_session:
+                await mcp_session.initialize()
+                await _perform_review(repo_name, pr_number, commit_sha, mcp_session)
+    except Exception as e:
+        print(f"Exception during PR analysis via MCP: {e}")
+
+async def _perform_review(repo_name: str, pr_number: int, commit_sha: str, mcp_session: ClientSession):
+    try:
             # 1. Get already reviewed files from DB
             reviewed_files = set()
             try:
@@ -278,12 +291,8 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
 
             # 2. Fetch the PR files
             files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
-            files_res = await httpx_client.get(files_url, headers=comment_headers)
-            if files_res.status_code != 200:
-                print(f"Failed to fetch PR files: {files_res.text}")
-                return
-
-            pr_files = files_res.json()
+            res = await mcp_session.call_tool("get_pr_files", {"repo_name": repo_name, "pr_number": pr_number})
+            pr_files = json.loads(res.content[0].text)
 
             eligible_files = []
             for file_obj in pr_files:
@@ -422,23 +431,24 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     "comments": inline_comments
                 }
 
-                res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
-
-                if res.status_code in [200, 201]:
+                try:
+                    await mcp_session.call_tool("post_review_comment", {"repo_name": repo_name, "pr_number": pr_number, "payload": review_payload})
                     print(f"Review for chunk posted successfully with {len(inline_comments)} inline comments!")
-                elif res.status_code == 422:
-                    print(f"Failed to post inline comments for chunk. Falling back to general review comment...")
-                    fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
-                    for ic in inline_comments:
-                        fallback_body += f"\n---\n📍 **{ic['path']} (Line {ic['line']})**\n{ic['body']}\n"
-                    review_payload["body"] = fallback_body
-                    review_payload["comments"] = []
+                except Exception as e:
+                    if "422 Unprocessable Entity" in str(e):
+                        print(f"Failed to post inline comments for chunk. Falling back to general review comment...")
+                        fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
+                        for ic in inline_comments:
+                            fallback_body += f"\n---\n📍 **{ic['path']} (Line {ic['line']})**\n{ic['body']}\n"
+                        review_payload["body"] = fallback_body
+                        review_payload["comments"] = []
 
-                    fallback_res = await httpx_client.post(review_url, headers=comment_headers, json=review_payload)
-                    if fallback_res.status_code not in [200, 201]:
-                        print(f"Failed to post fallback review. Status: {fallback_res.status_code}, Response: {fallback_res.text}")
-                else:
-                    print(f"Failed to post review for chunk. Status: {res.status_code}, Response: {res.text}")
+                        try:
+                            await mcp_session.call_tool("post_review_comment", {"repo_name": repo_name, "pr_number": pr_number, "payload": review_payload})
+                        except Exception as inner_e:
+                            print(f"Failed to post fallback review: {inner_e}")
+                    else:
+                        print(f"Failed to post review for chunk: {e}")
 
             def get_dir(f):
                 parts = f['filename'].split('/')
@@ -464,12 +474,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     for risk in summary_data.get('module_risks', []):
                         body_text += f"- {risk}\n"
 
-                    await httpx_client.post(review_url, headers=comment_headers, json={
-                        "commit_id": commit_sha,
-                        "body": body_text,
-                        "event": "COMMENT",
-                        "comments": []
-                    })
+                    await mcp_session.call_tool("post_review_comment", {"repo_name": repo_name, "pr_number": pr_number, "payload": {"commit_id": commit_sha, "body": body_text, "event": "COMMENT", "comments": []}})
                 except Exception as e:
                     print(f"Error generating summary: {e}")
 
@@ -495,7 +500,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     chunks = chunk_files_fn(top_files)
 
                     triage_msg = f"### Ollama AI Review Status\n\nThis PR contains {file_count} files. Performed AI triage and selected the top {len(top_files)} highest-risk files for deep review.\n\n*Model: `{OLLAMA_MODEL}` running locally via Ollama*"
-                    await httpx_client.post(issue_comment_url, headers=comment_headers, json={"body": triage_msg})
+                    await mcp_session.call_tool("post_issue_comment", {"repo_name": repo_name, "pr_number": pr_number, "body": triage_msg})
 
                     for chunk in chunks:
                         await process_and_post_chunk(chunk)
@@ -515,12 +520,11 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                 await process_and_post_chunk(eligible_files)
 
             # Stale-SHA guard
-            pr_info_res = await httpx_client.get(f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}", headers=comment_headers)
-            if pr_info_res.status_code == 200:
-                current_sha = pr_info_res.json().get("head", {}).get("sha", "")
-                if current_sha and current_sha != commit_sha:
-                    print(f"PR HEAD SHA has changed ({current_sha} != {commit_sha}). Aborting final review post.")
-                    return
+            res = await mcp_session.call_tool("check_pr_sha", {"repo_name": repo_name, "pr_number": pr_number})
+            current_sha = json.loads(res.content[0].text)
+            if current_sha and current_sha != commit_sha:
+                print(f"PR HEAD SHA has changed ({current_sha} != {commit_sha}). Aborting final review post.")
+                return
 
             # Post final meta-summary
             if file_count < 50:
@@ -537,7 +541,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     "event": final_verdict,
                     "comments": []
                 }
-                await httpx_client.post(review_url, headers=comment_headers, json=summary_payload)
+                await mcp_session.call_tool("post_review_comment", {"repo_name": repo_name, "pr_number": pr_number, "payload": summary_payload})
 
     except Exception as e:
         print(f"Exception during PR analysis: {e}")
