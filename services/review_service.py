@@ -7,6 +7,8 @@ import jwt  # Installed via PyJWT
 import jwt
 import httpx
 import urllib.parse
+from pydantic import ValidationError
+import asyncpg
 from models.schemas import CodeReviewResult, TriageResult, SummaryReviewResult
 from dotenv import load_dotenv
 from constants.prompts import REVIEW_PROMPT_TEMPLATE, TRIAGE_PROMPT_TEMPLATE, SUMMARY_PROMPT_TEMPLATE
@@ -18,6 +20,25 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 
 APP_ID = os.environ.get("GITHUB_APP_ID")
 PRIVATE_KEY_PATH = os.environ.get("GITHUB_PRIVATE_KEY_PATH")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
+
+async def init_db():
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS review_state (
+                id SERIAL PRIMARY KEY,
+                repo_name VARCHAR(255) NOT NULL,
+                pr_number INT NOT NULL,
+                commit_sha VARCHAR(255) NOT NULL,
+                filename TEXT NOT NULL,
+                UNIQUE(repo_name, pr_number, commit_sha, filename)
+            )
+        ''')
+        await conn.close()
+    except Exception as e:
+        print(f"Failed to init DB: {e}")
+
 
 
 async def _call_ollama(prompt: str, max_retries: int = 3) -> str:
@@ -59,19 +80,31 @@ async def _call_ollama(prompt: str, max_retries: int = 3) -> str:
 
 
 def _extract_json(text: str) -> str:
-    """Extracts JSON object from model output."""
-    # Strip markdown code fences if present
+    """Extracts JSON object from model output using brace counting."""
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fenced:
         return fenced.group(1)
 
-    # Find the first { ... } block
     start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
+    if start == -1:
+        return text
+
+    brace_count = 0
+    end = start
+    for i, char in enumerate(text[start:], start=start):
+        if char == "{":
+            brace_count += 1
+        elif char == "}":
+            brace_count -= 1
+        
+        if brace_count == 0:
+            end = i
+            break
+
+    if end > start:
         return text[start:end + 1]
 
-    return text  # Return as-is and let the caller handle parse errors
+    return text
 
 
 async def get_github_installation_token(repo_name: str) -> str:
@@ -213,9 +246,10 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
     """Main orchestration function for evaluating pull requests based on size."""
     start_time = time.time()
     try:
+        await init_db()
         github_token = await get_github_installation_token(repo_name)
     except Exception as e:
-        print(f"Authentication failed: {e}")
+        print(f"Init failed: {e}")
         return
 
     comment_headers = {
@@ -228,18 +262,19 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
 
     try:
         async with httpx.AsyncClient() as httpx_client:
-            # 1. Get already reviewed files to prevent duplicate reviews
+            # 1. Get already reviewed files from DB
             reviewed_files = set()
-            existing_res = await httpx_client.get(review_url, headers=comment_headers)
-            if existing_res.status_code == 200:
-                for review in existing_res.json():
-                    body = review.get("body", "")
-                    # Updated header string to reflect Ollama instead of Gemini
-                    if "### Ollama AI Review Feedback for `" in body:
-                        start_idx = body.find("### Ollama AI Review Feedback for `") + len("### Ollama AI Review Feedback for `")
-                        end_idx = body.find("`", start_idx)
-                        if end_idx != -1:
-                            reviewed_files.add(body[start_idx:end_idx])
+            try:
+                conn = await asyncpg.connect(DATABASE_URL)
+                rows = await conn.fetch('''
+                    SELECT filename FROM review_state
+                    WHERE repo_name = $1 AND pr_number = $2 AND commit_sha = $3
+                ''', repo_name, pr_number, commit_sha)
+                for row in rows:
+                    reviewed_files.add(row['filename'])
+                await conn.close()
+            except Exception as e:
+                print(f"Failed to fetch reviewed files from DB: {e}")
 
             # 2. Fetch the PR files
             files_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/files?per_page=100"
@@ -289,13 +324,33 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     })
 
                 print(f"Analyzing chunk of {len(files_data)} files with Ollama ({OLLAMA_MODEL})...")
-                try:
-                    review_json_str = await ask_ollama_to_review(files_data)
-                    review_data = json.loads(review_json_str)
-                    return review_data, chunk_files
-                except Exception as e:
-                    print(f"Could not retrieve or parse review for chunk. Error: {e}")
-                    return None, chunk_files
+                for attempt in range(2):
+                    try:
+                        review_json_str = await ask_ollama_to_review(files_data)
+                        review_data = CodeReviewResult.model_validate_json(review_json_str)
+                        
+                        # Mark these files as reviewed in DB
+                        try:
+                            conn = await asyncpg.connect(DATABASE_URL)
+                            for f in chunk_files:
+                                await conn.execute('''
+                                    INSERT INTO review_state (repo_name, pr_number, commit_sha, filename)
+                                    VALUES ($1, $2, $3, $4)
+                                    ON CONFLICT DO NOTHING
+                                ''', repo_name, pr_number, commit_sha, f.get("filename"))
+                            await conn.close()
+                        except Exception as e:
+                            print(f"DB Error marking files as reviewed: {e}")
+
+                        return review_data.model_dump(), chunk_files
+                    except ValidationError as e:
+                        print(f"Pydantic Validation Error on attempt {attempt+1}: {e}")
+                        if attempt == 1:
+                            return None, chunk_files
+                    except Exception as e:
+                        print(f"Could not retrieve or parse review for chunk. Error: {e}")
+                        return None, chunk_files
+                return None, chunk_files
 
             async def process_and_post_chunk(chunk_files: list[dict]):
                 review_data, _ = await review_chunk(chunk_files)
@@ -322,6 +377,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     line_number = c.get("line")
                     comment_text = c.get("description", "")
                     suggestion = c.get("suggestion", "")
+                    severity = c.get("severity", "info")
                     issue_type = c.get("category", "issue")
 
                     if line_number is None:
@@ -341,15 +397,18 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                     if suggestion:
                         body += f"\n\n**Suggestion:**\n```python\n{suggestion}\n```"
 
-                    if line_number in valid_lines_map[c_file_path]:
-                        inline_comments.append({
-                            "path": c_file_path,
-                            "line": line_number,
-                            "side": "RIGHT",
-                            "body": body
-                        })
+                    if severity in ["low", "info"]:
+                        general_body_parts.append(f"---\n📍 **{c_file_path} Line {line_number} ({severity})**\n{body}")
                     else:
-                        general_body_parts.append(f"---\n📍 **{c_file_path} Line {line_number} (Out of Diff Context)**\n{body}")
+                        if line_number in valid_lines_map[c_file_path]:
+                            inline_comments.append({
+                                "path": c_file_path,
+                                "line": line_number,
+                                "side": "RIGHT",
+                                "body": body
+                            })
+                        else:
+                            general_body_parts.append(f"---\n📍 **{c_file_path} Line {line_number} (Out of Diff Context)**\n{body}")
 
                 if not inline_comments and len(general_body_parts) <= 1:
                     return
@@ -400,7 +459,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
                 print("Strategy: Summary only (50+ files)")
                 try:
                     summary_json_str = await ask_ollama_summary(eligible_files)
-                    summary_data = json.loads(summary_json_str)
+                    summary_data = SummaryReviewResult.model_validate_json(summary_json_str).model_dump()
                     body_text = f"### Ollama AI PR Summary (50+ files)\n\n*Due to the size of this PR, a deep line-by-line review was skipped.*\n\n**Summary:**\n{summary_data.get('summary', '')}\n\n**Module Risks:**\n"
                     for risk in summary_data.get('module_risks', []):
                         body_text += f"- {risk}\n"
@@ -421,7 +480,7 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
 
                 try:
                     triage_json_str = await ask_ollama_triage(triage_candidates)
-                    triage_data = json.loads(triage_json_str)
+                    triage_data = TriageResult.model_validate_json(triage_json_str).model_dump()
 
                     file_map = {f['filename']: f for f in triage_candidates}
 
@@ -454,6 +513,14 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
             else:
                 print("Strategy: Single Prompt (1-5 files)")
                 await process_and_post_chunk(eligible_files)
+
+            # Stale-SHA guard
+            pr_info_res = await httpx_client.get(f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}", headers=comment_headers)
+            if pr_info_res.status_code == 200:
+                current_sha = pr_info_res.json().get("head", {}).get("sha", "")
+                if current_sha and current_sha != commit_sha:
+                    print(f"PR HEAD SHA has changed ({current_sha} != {commit_sha}). Aborting final review post.")
+                    return
 
             # Post final meta-summary
             if file_count < 50:

@@ -1,13 +1,13 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 class CodeReviewComment(BaseModel):
     path: str = Field(description="The path of the file being reviewed")
     start_line: Optional[int] = Field(None, description="The starting line number for multi-line comments")
     line: int = Field(description="The absolute integer line number prepended to the valid diff line (e.g., if you see '42: + code', output 42)")
     side: str = Field(description="'RIGHT' for added/modified, 'LEFT' for deleted")
-    severity: str = Field(description="critical | high | medium | low | info")
-    category: str = Field(description="security | bug | performance | etc.")
+    severity: Literal["critical", "high", "medium", "low", "info"] = Field(description="critical | high | medium | low | info")
+    category: Literal["security", "bug", "performance", "maintainability", "logic", "other"] = Field(description="security | bug | performance | etc.")
     title: str = Field(description="Short imperative summary of the issue")
     description: str = Field(description="What the problem is, why it matters, and the impact")
     suggestion: Optional[str] = Field(None, description="Suggested code fix or improvement")
@@ -28,7 +28,7 @@ class ReviewStats(BaseModel):
 
 class CodeReviewResult(BaseModel):
     summary: str = Field(description="Overall summary of the PR and code quality")
-    verdict: str = Field(description="APPROVE | COMMENT | REQUEST_CHANGES")
+    verdict: Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"] = Field(description="APPROVE | COMMENT | REQUEST_CHANGES")
     overall_confidence: float
     stats: ReviewStats
     comments: List[CodeReviewComment] = Field(description="List of specific code review findings")
