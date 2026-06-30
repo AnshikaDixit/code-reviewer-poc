@@ -303,8 +303,11 @@ async def _perform_review(repo_name: str, pr_number: int, commit_sha: str, mcp_s
                 return
                 
             if isinstance(pr_files, dict):
-                print(f"Expected list for pr_files, got dict: {pr_files}")
-                return
+                if "filename" in pr_files:
+                    pr_files = [pr_files]
+                else:
+                    print(f"Expected list for pr_files, got dict: {pr_files}")
+                    return
             if not isinstance(pr_files, list):
                 print(f"Expected list for pr_files, got {type(pr_files)}: {pr_files}")
                 return
