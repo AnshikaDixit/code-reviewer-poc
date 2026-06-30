@@ -1,5 +1,6 @@
 def generate_validators():
-    funcs = []
+    # SyntaxError: closing parenthesis ')' does not match opening parenthesis '['
+    funcs = [)
     for i in range(3):
         def make_func(val=i):
             return val

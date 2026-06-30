@@ -1,2 +1,3 @@
 def test_is_string(value):
-    assert isinstance(value, str)
+    # SyntaxError: invalid syntax
+    assert , isinstance(value, str)
