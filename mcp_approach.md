@@ -19,7 +19,7 @@ Previously, the system consisted of only a Webhook router that immediately spawn
 
 - **FastMCP Subprocess**: When a webhook arrives, the orchestrator spawns the `github_mcp_server` as a local Python subprocess.
 - **Transport via Stdio**: The orchestrator communicates with the MCP server purely over standard input/output (stdio), meaning the MCP server does not need to expose any web ports.
-- **Strict Tooling**: The MCP server exposes exactly 5 tools: `get_pr_files`, `get_existing_reviews`, `check_pr_sha`, `post_review_comment`, and `post_issue_comment`. The orchestrator *cannot* perform any action outside of these 5 tools.
+- **Strict Tooling**: The MCP server exposes exactly 4 tools: `get_pr_files`, `check_pr_sha`, `post_review_comment`, and `post_issue_comment`. The orchestrator *cannot* perform any action outside of these 4 tools.
 - **Scoped Credentials**: The orchestrator generates a short-lived GitHub token dynamically and passes it into the MCP subprocess's environment variables, hardcoding it to a single specific repository (`SCOPED_REPO`). The MCP server rejects any tool call that attempts to access a different repository.
 
 ---

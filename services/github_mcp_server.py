@@ -29,16 +29,7 @@ async def get_pr_files(repo_name: str, pr_number: int) -> list[dict]:
             raise Exception(f"Failed to fetch PR files: {res.text}")
         return res.json()
 
-@mcp.tool()
-async def get_existing_reviews(repo_name: str, pr_number: int) -> list[dict]:
-    """Fetches existing review comments to help deduplicate processing."""
-    headers = _get_headers(repo_name)
-    review_url = f"https://api.github.com/repos/{repo_name}/pulls/{pr_number}/reviews"
-    async with httpx.AsyncClient() as client:
-        res = await client.get(review_url, headers=headers)
-        if res.status_code == 200:
-            return res.json()
-        return []
+
 
 @mcp.tool()
 async def check_pr_sha(repo_name: str, pr_number: int) -> str:
