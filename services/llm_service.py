@@ -11,9 +11,11 @@ class LLMService:
     def __init__(self):
         self.ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         self.ollama_model = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
+        self.call_count = 0
 
     async def _call_ollama(self, prompt: str, max_retries: int = 3) -> str:
         """Core function to send an HTTP POST request to the local Ollama instance."""
+        self.call_count += 1
         payload = {
             "model": self.ollama_model,
             "messages": [{"role": "user", "content": prompt}],

@@ -68,5 +68,13 @@ async def analyze_pull_request(repo_name: str, pr_number: int, commit_sha: str):
         strategy = StrategyFactory.get_strategy(file_count, llm_service, github_service, commit_sha)
         await strategy.execute(eligible_files, pr_number)
 
+        end_time = time.time()
+        elapsed = end_time - start_time
+        print(f"\n==================================================")
+        print(f"PR #{pr_number} Analysis Complete!")
+        print(f"Time taken: {elapsed:.2f} seconds")
+        print(f"LLM Calls made: {llm_service.call_count}")
+        print(f"==================================================\n")
+
     except Exception as e:
         print(f"Exception during PR analysis: {e}")

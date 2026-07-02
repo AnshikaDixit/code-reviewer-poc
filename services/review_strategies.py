@@ -110,7 +110,9 @@ class ReviewStrategy:
         res = await self.github.post_review(pr_number, review_payload)
 
         if res.status_code in [200, 201]:
+            print(f"----------------------------------------------------------------------------------")
             print(f"Review for chunk posted successfully with {len(inline_comments)} inline comments!")
+            print(f"----------------------------------------------------------------------------------")
         elif res.status_code == 422:
             print(f"Failed to post inline comments for chunk. Falling back to general review comment...")
             fallback_body = review_payload["body"] + "\n\n### Detailed Comments\n"
@@ -181,6 +183,7 @@ class TriageChunkedStrategy(ReviewStrategy):
 
             triage_candidates.sort(key=lambda f: (-f.get('local_score', 0), self._get_dir(f)))
             top_files = triage_candidates[:15]
+            leftover_files = triage_candidates[15:]
 
             chunks = self._chunk_files(top_files)
 
@@ -191,6 +194,21 @@ class TriageChunkedStrategy(ReviewStrategy):
                 await self._process_and_post_chunk(chunk, pr_number)
                 await asyncio.sleep(2)
             
+            if leftover_files:
+                print(f"📝 Generating summary for {len(leftover_files)} leftover files...")
+                summary_json_str = await self.llm.ask_ollama_summary(leftover_files)
+                summary_data = json.loads(summary_json_str)
+                body_text = f"### Ollama AI Leftover Files Summary\n\n*The top 15 most critical files were reviewed deeply. Here is a summary of the remaining {len(leftover_files)} files:*\n\n**Summary:**\n{summary_data.get('summary', '')}\n\n**Module Risks:**\n"
+                for risk in summary_data.get('module_risks', []):
+                    body_text += f"- {risk}\n"
+
+                await self.github.post_review(pr_number, {
+                    "commit_id": self.commit_sha,
+                    "body": body_text,
+                    "event": "COMMENT",
+                    "comments": []
+                })
+
             await self.post_meta_summary(pr_number)
         except Exception as e:
             print(f"Error during triage: {e}")
