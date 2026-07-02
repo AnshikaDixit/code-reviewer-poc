@@ -1,6 +1,8 @@
 import time
 import json
-from services.review_service import ask_ollama_to_review, ask_ollama_triage, ask_ollama_summary
+from services.llm_service import LLMService
+
+llm = LLMService()
 from constants.messages import (
     MOCK_SENDING_TO_OLLAMA,
     MOCK_OLLAMA_SUCCESS,
@@ -19,7 +21,7 @@ async def mock_analyze_pull_request():
     try:
         start = time.time()
         print(MOCK_SENDING_TO_OLLAMA)
-        review_json_str = await ask_ollama_to_review(mock_files, max_retries=1)
+        review_json_str = await llm.ask_ollama_to_review(mock_files, max_retries=1)
         duration = time.time() - start
         
         # Verify JSON is valid (basic parsing check)
@@ -56,16 +58,16 @@ async def mock_adaptive_analyze_pull_request(file_count: int):
 
     async def review_chunk(chunk_files):
         files_data = [{"filename": f["filename"], "diff_text": f["numbered_patch"]} for f in chunk_files]
-        await ask_ollama_to_review(files_data, max_retries=1)
+        await llm.ask_ollama_to_review(files_data, max_retries=1)
 
     start = time.time()
     try:
         if file_count >= 50:
             print(f"Mock [{file_count} files]: Strategy Summary only")
-            await ask_ollama_summary(eligible_files, max_retries=1)
+            await llm.ask_ollama_summary(eligible_files, max_retries=1)
         elif file_count >= 21:
             print(f"Mock [{file_count} files]: Strategy Triage + Chunked Review")
-            await ask_ollama_triage(eligible_files, max_retries=1)
+            await llm.ask_ollama_triage(eligible_files, max_retries=1)
             # triage logic takes top 15
             top_files = eligible_files[:15]
             chunks = chunk_files_fn(top_files)
