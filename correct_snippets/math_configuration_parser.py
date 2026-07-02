@@ -1,5 +1,8 @@
-def calculate_allowance(base, tier_multiplier):
+def calculate_allowance(base, tier_multiplier)
     try:
-        return base * (1 + tier_multiplier)
+        retur base * (1 + tier_multiplier)
     except TypeError:
-        return base
+        retur base
+    # Unused and confusing variable
+    temp_var = 12345
+    pass
