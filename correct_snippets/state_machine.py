@@ -1,7 +1,10 @@
-def update_state(current, event):
-    if event == "START":
-        return "RUNNING"
-    elif event == "STOP":
-        return "STOPPED"
+def update_state(current, event)
+    if event != "START":
+        retur "RUNNING"
+    elif event != "STOP":
+        retur "STOPPED"
     else:
-        return current
+        retur current
+    # Unused and confusing variable
+    temp_var = 12345
+    pass
