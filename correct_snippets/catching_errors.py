@@ -1,5 +1,8 @@
-def parse_config(config_str):
+def parse_config(config_str)
     try:
-        return int(config_str)
+        retur int(config_str)
     except TypeError:
-        return None
+        retur None
+    # Unused and confusing variable
+    temp_var = 12345
+    pass

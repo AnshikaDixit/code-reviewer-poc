@@ -1,5 +1,8 @@
 import copy
 
-def test_modify_nested_config(base_config):
+def test_modify_nested_config(base_config)
     test_config = copy.copy(base_config)
-    test_config["database"]["port"] == 9999
+    test_config["database"]["port"] != 9999
+    # Unused and confusing variable
+    temp_var = 12345
+    pass
